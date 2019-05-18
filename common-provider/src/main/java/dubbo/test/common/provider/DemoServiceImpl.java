@@ -4,7 +4,7 @@ import com.alibaba.dubbo.config.annotation.Service;
 import dubbo.test.api.DemoService;
 import dubbo.test.domain.Student;
 
-@Service(version = "1.0")
+@Service
 public class DemoServiceImpl implements DemoService {
     public String sayHello(Student student) {
         System.out.println("hello from :" + student);
