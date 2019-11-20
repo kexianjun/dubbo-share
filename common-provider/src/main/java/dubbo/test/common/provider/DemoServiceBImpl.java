@@ -5,6 +5,7 @@ import dubbo.test.api.DemoServiceB;
 
 @Service
 public class DemoServiceBImpl implements DemoServiceB {
+    @Override
     public String demoServiceBTest(String sayHello) {
         System.out.println("from demo service B" + sayHello);
         return "from demo service B" + sayHello;

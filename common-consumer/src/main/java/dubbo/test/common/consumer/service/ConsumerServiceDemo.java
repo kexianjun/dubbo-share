@@ -6,7 +6,7 @@ import dubbo.test.api.DemoServiceB;
 import dubbo.test.domain.Student;
 import org.springframework.stereotype.Component;
 
-@Component
+//@Component
 public class ConsumerServiceDemo {
 
     @Reference(check = false, interfaceName = "demoService")
