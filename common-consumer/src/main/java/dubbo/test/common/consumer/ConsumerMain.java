@@ -1,17 +1,16 @@
 package dubbo.test.common.consumer;
 
-import com.alibaba.dubbo.config.ConsumerConfig;
 import com.alibaba.dubbo.config.spring.context.annotation.EnableDubbo;
-import dubbo.test.common.consumer.service.ConsumerServiceDemo;
+import com.alibaba.dubbo.rpc.RpcContext;
 import dubbo.test.common.consumer.service.GenericServiceCallDemo;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
-import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.ComponentScan;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.PropertySource;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.Future;
 
 public class ConsumerMain {
     public static void main(String[] args) throws Exception {
@@ -24,11 +23,19 @@ public class ConsumerMain {
         Map<String, Object> map = new HashMap<>();
         map.put("name", "KEXIANJUN");
         map.put("school", "WUST");
-        serviceCallDemo.testMethod(map, result -> {
-            System.out.println("async result:" + result);
-            return result;
-        });
+        RpcContext.getContext().set("callback-param-1", "call first");
+        serviceCallDemo.testMethod(map);
+        RpcContext.removeContext();
         System.out.println("call return");
+
+        RpcContext.getContext().set("callback-param-1", "call second");
+        serviceCallDemo.testMethod(map);
+
+        RpcContext.removeContext();
+
+        RpcContext.getContext().set("callback-param-1", "call third");
+        serviceCallDemo.testMethod(map);
+        RpcContext.removeContext();
         System.in.read();
     }
 

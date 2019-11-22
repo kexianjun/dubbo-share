@@ -4,6 +4,7 @@ import com.alibaba.dubbo.common.Constants;
 import com.alibaba.dubbo.common.extension.Activate;
 import com.alibaba.dubbo.common.logger.Logger;
 import com.alibaba.dubbo.common.logger.LoggerFactory;
+import com.alibaba.dubbo.common.utils.StringUtils;
 import com.alibaba.dubbo.config.model.ApplicationModel;
 import com.alibaba.dubbo.config.model.ConsumerModel;
 import com.alibaba.dubbo.remoting.exchange.ResponseCallback;
@@ -18,9 +19,12 @@ import com.alibaba.dubbo.rpc.StaticContext;
 import com.alibaba.dubbo.rpc.protocol.dubbo.FutureAdapter;
 import com.alibaba.dubbo.rpc.protocol.dubbo.filter.FutureFilter;
 import com.alibaba.dubbo.rpc.support.RpcUtils;
+import dubbo.test.common.consumer.service.CallBackParam;
 
+import java.lang.annotation.Annotation;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.util.Map;
 import java.util.concurrent.Future;
 
 @Activate(group = Constants.CONSUMER, order = 100)
@@ -52,32 +56,55 @@ public class GenericAsyncFilter implements Filter {
     }
 
     private void asyncCallback(final Invoker<?> invoker, final Invocation invocation) {
-        Future<?> f = RpcContext.getContext().getFuture();
+        RpcContext context = RpcContext.getContext();
+        Future<?> f = context.getFuture();
         if (f instanceof FutureAdapter) {
             ResponseFuture future = ((FutureAdapter<?>) f).getFuture();
             future.setCallback(new ResponseCallback() {
                 @Override
                 public void done(Object rpcResult) {
-                    if (rpcResult == null) {
-                        logger.error(new IllegalStateException("invalid result value : null, expected " + Result.class.getName()));
-                        return;
+                    RpcContext rpcContext = RpcContext.getContext();
+                    Map<String, Object> valueMap = context.get();
+                    if (null != valueMap && !valueMap.isEmpty()) {
+                        for (Map.Entry<String, Object> entry : valueMap.entrySet()) {
+                            rpcContext.set(entry.getKey(), entry.getValue());
+                        }
                     }
-                    ///must be rpcResult
-                    if (!(rpcResult instanceof Result)) {
-                        logger.error(new IllegalStateException("invalid result type :" + rpcResult.getClass() + ", expected " + Result.class.getName()));
-                        return;
-                    }
-                    Result result = (Result) rpcResult;
-                    if (result.hasException()) {
-                        fireThrowCallback(invoker, invocation, result.getException());
-                    } else {
-                        fireReturnCallback(invoker, invocation, result.getValue());
+                    try {
+                        if (rpcResult == null) {
+                            logger.error(new IllegalStateException("invalid result value : null, expected " + Result.class.getName()));
+                            return;
+                        }
+                        ///must be rpcResult
+                        if (!(rpcResult instanceof Result)) {
+                            logger.error(new IllegalStateException("invalid result type :" + rpcResult.getClass() + ", expected " + Result.class.getName()));
+                            return;
+                        }
+                        Result result = (Result) rpcResult;
+                        if (result.hasException()) {
+                            fireThrowCallback(invoker, invocation, result.getException());
+                        } else {
+                            fireReturnCallback(invoker, invocation, result.getValue());
+                        }
+                    } finally {
+                        RpcContext.removeContext();
                     }
                 }
 
                 @Override
                 public void caught(Throwable exception) {
-                    fireThrowCallback(invoker, invocation, exception);
+                    RpcContext rpcContext = RpcContext.getContext();
+                    Map<String, Object> valueMap = context.get();
+                    if (null != valueMap && !valueMap.isEmpty()) {
+                        for (Map.Entry<String, Object> entry : valueMap.entrySet()) {
+                            rpcContext.set(entry.getKey(), entry.getValue());
+                        }
+                    }
+                    try{
+                        fireThrowCallback(invoker, invocation, exception);
+                    }finally {
+                        RpcContext.removeContext();
+                    }
                 }
             });
         }
@@ -130,19 +157,43 @@ public class GenericAsyncFilter implements Filter {
         Object[] args = invocation.getArguments();
         Object[] params;
         Class<?>[] rParaTypes = onReturnMethod.getParameterTypes();
-        if (rParaTypes.length > 1) {
-            if (rParaTypes.length == 2 && rParaTypes[1].isAssignableFrom(Object[].class)) {
-                params = new Object[2];
-                params[0] = result;
-                params[1] = args;
+        boolean generic = invoker.getUrl().getParameter(Constants.GENERIC_KEY, false);
+            if (rParaTypes.length > 1) {
+                if (rParaTypes.length == 2 && rParaTypes[1].isAssignableFrom(Object[].class)) {
+                    params = new Object[2];
+                    params[0] = result;
+                    params[1] = args;
+                } else {
+                    if (!generic) {
+                        params = new Object[args.length + 1];
+                        params[0] = result;
+                        System.arraycopy(args, 0, params, 1, args.length);
+                    } else {
+                        params = new Object[rParaTypes.length];
+                        params[0] = result;
+                        params[1] = args;
+                        int index = 2;
+                        Annotation[][] parameterAnnotations = onReturnMethod.getParameterAnnotations();
+                        for (Annotation[] annotations : parameterAnnotations) {
+                            for (Annotation annotation : annotations) {
+                                if (annotation instanceof CallBackParam) {
+                                    CallBackParam callBackParamAnnotation = (CallBackParam) annotation;
+                                    String name = callBackParamAnnotation.name();
+                                    if (StringUtils.isNotEmpty(name)) {
+                                        RpcContext context = RpcContext.getContext();
+                                        Object userParam = context.get(name);
+                                        params[index++] = userParam;
+                                    }
+                                }
+                            }
+                        }
+
+                    }
+                }
             } else {
-                params = new Object[args.length + 1];
-                params[0] = result;
-                System.arraycopy(args, 0, params, 1, args.length);
+                params = new Object[]{result};
             }
-        } else {
-            params = new Object[]{result};
-        }
+
         try {
             onReturnMethod.invoke(onReturnInst, params);
         } catch (InvocationTargetException e) {
@@ -153,11 +204,14 @@ public class GenericAsyncFilter implements Filter {
     }
 
     private void fireThrowCallback(final Invoker<?> invoker, final Invocation invocation, final Throwable exception) {
-        final Method onthrowMethod = (Method) StaticContext.getSystemContext().get(StaticContext.getKey(invoker.getUrl(), invocation.getMethodName(), Constants.ON_THROW_METHOD_KEY));
-        final Object onthrowInst = StaticContext.getSystemContext().get(StaticContext.getKey(invoker.getUrl(), invocation.getMethodName(), Constants.ON_THROW_INSTANCE_KEY));
-
+        AsyncMethodInfo asyncMethodInfo = getAsyncMethodInfo(invoker, invocation);
+        if (null == asyncMethodInfo) {
+            return;
+        }
+        Object onthrowInst = asyncMethodInfo.getOnthrowInstance();
+        Method onthrowMethod = asyncMethodInfo.getOnthrowMethod();
         //onthrow callback not configured
-        if (onthrowMethod == null && onthrowInst == null) {
+        if (onthrowInst == null && onthrowMethod == null) {
             return;
         }
         if (onthrowMethod == null || onthrowInst == null) {
@@ -167,6 +221,7 @@ public class GenericAsyncFilter implements Filter {
             onthrowMethod.setAccessible(true);
         }
         Class<?>[] rParaTypes = onthrowMethod.getParameterTypes();
+        boolean generic = invoker.getUrl().getParameter(Constants.GENERIC_KEY, false);
         if (rParaTypes[0].isAssignableFrom(exception.getClass())) {
             try {
                 Object[] args = invocation.getArguments();
@@ -178,9 +233,30 @@ public class GenericAsyncFilter implements Filter {
                         params[0] = exception;
                         params[1] = args;
                     } else {
-                        params = new Object[args.length + 1];
-                        params[0] = exception;
-                        System.arraycopy(args, 0, params, 1, args.length);
+                        if (!generic) {
+                            params = new Object[args.length + 1];
+                            params[0] = exception;
+                            System.arraycopy(args, 0, params, 1, args.length);
+                        } else {
+                            params = new Object[rParaTypes.length];
+                            params[0] = exception;
+                            params[1] = args;
+                            int index = 2;
+                            Annotation[][] parameterAnnotations = onthrowMethod.getParameterAnnotations();
+                            for (Annotation[] annotations : parameterAnnotations) {
+                                for (Annotation annotation : annotations) {
+                                    if (annotation instanceof CallBackParam) {
+                                        CallBackParam callBackParamAnnotation = (CallBackParam) annotation;
+                                        String name = callBackParamAnnotation.name();
+                                        if (StringUtils.isNotEmpty(name)) {
+                                            RpcContext context = RpcContext.getContext();
+                                            Object userParam = context.get(name);
+                                            params[index++] = userParam;
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 } else {
                     params = new Object[]{exception};
@@ -209,6 +285,12 @@ public class GenericAsyncFilter implements Filter {
         AsyncMethodInfo asyncMethodInfo = new AsyncMethodInfo();
         asyncMethodInfo.setOnreturnInstance(onReturnInstance);
         asyncMethodInfo.setOnreturnMethod(onReturnMethod);
+
+        final Method onThrowMethod = (Method) StaticContext.getSystemContext().get(StaticContext.getKey(invoker.getUrl(), methodName, Constants.ON_THROW_METHOD_KEY));
+        final Object onThrowInstance = StaticContext.getSystemContext().get(StaticContext.getKey(invoker.getUrl(), methodName, Constants.ON_THROW_INSTANCE_KEY));
+
+        asyncMethodInfo.setOnthrowInstance(onThrowInstance);
+        asyncMethodInfo.setOnthrowMethod(onThrowMethod);
         return asyncMethodInfo;
     }
 
